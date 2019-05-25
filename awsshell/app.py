@@ -17,6 +17,7 @@ from prompt_toolkit.interface import CommandLineInterface, Application
 from prompt_toolkit.interface import AbortAction, AcceptAction
 from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.history import InMemoryHistory, FileHistory
+from prompt_toolkit.enums import EditingMode
 
 from awsshell.ui import create_default_layout
 from awsshell.config import Config
@@ -79,6 +80,11 @@ class EditHandler(object):
         else:
             return compat.default_editor()
 
+    def _generate_edit_history(self, application):
+        history = list(application.history)
+        commands = [h for h in history if not h.startswith(('.', '!'))]
+        return '\n'.join(commands)
+
     def run(self, command, application):
         """Open application's history buffer in an editor.
 
@@ -90,10 +96,8 @@ class EditHandler(object):
         :param application: The application object.
 
         """
-        all_commands = '\n'.join(
-            ['aws ' + h for h in list(application.history)
-             if not h.startswith(('.', '!'))])
         with temporary_file('w') as f:
+            all_commands = self._generate_edit_history(application)
             f.write(all_commands)
             f.flush()
             editor = self._get_editor_command()
@@ -221,7 +225,7 @@ class AWSShell(object):
     """
 
     def __init__(self, completer, model_completer, docs,
-                 input=None, output=None):
+                 input=None, output=None, popen_cls=None):
         self.completer = completer
         self.model_completer = model_completer
         self.history = InMemoryHistory()
@@ -236,6 +240,10 @@ class AWSShell(object):
         self._profile = None
         self._input = input
         self._output = output
+
+        if popen_cls is None:
+            popen_cls = subprocess.Popen
+        self._popen_cls = popen_cls
 
         # These attrs come from the config file.
         self.config_obj = None
@@ -308,7 +316,7 @@ class AWSShell(object):
                         initial_document=Document(self.current_docs,
                                                   cursor_position=0))
                     self.cli.request_redraw()
-                    p = subprocess.Popen(full_cmd, shell=True, env=self._env)
+                    p = self._popen_cls(full_cmd, shell=True, env=self._env)
                     p.communicate()
 
     def stop_input_and_refresh_cli(self):
@@ -417,7 +425,13 @@ class AWSShell(object):
             'clidocs': Buffer(read_only=True)
         }
 
+        if self.enable_vi_bindings:
+            editing_mode = EditingMode.VI
+        else:
+            editing_mode = EditingMode.EMACS
+
         return Application(
+            editing_mode=editing_mode,
             layout=self.create_layout(display_completions_in_columns, toolbar),
             mouse_support=False,
             style=style_factory.style,
@@ -447,8 +461,18 @@ class AWSShell(object):
                 self.current_docs = self._docs.extract_description(key_name)
         else:
             self.current_docs = u''
+
+        position = cli.buffers['clidocs'].document.cursor_position
+        # if the docs to be displayed have changed, reset position to 0
+        if cli.buffers['clidocs'].text != self.current_docs:
+            position = 0
+
         cli.buffers['clidocs'].reset(
-            initial_document=Document(self.current_docs, cursor_position=0))
+            initial_document=Document(
+                self.current_docs,
+                cursor_position=position
+            )
+        )
         cli.request_redraw()
 
     def create_cli_interface(self, display_completions_in_columns):
